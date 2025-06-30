@@ -1,11 +1,11 @@
-use tokio::net::TcpListener;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use jsonwebtoken::{encode, EncodingKey, Header};
 use webrtc_signaling::messages::{ClientMessage, ServerMessage};
 use webrtc_signaling::server::start_server;
-use jsonwebtoken::{encode, EncodingKey, Header};
 
 // Helper function to create a test JWT token
 fn create_test_token(secret: &str, user_id: u32, username: &str) -> String {
@@ -27,7 +27,8 @@ fn create_test_token(secret: &str, user_id: u32, username: &str) -> String {
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(secret.as_ref()),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 // Helper function to find an available port
@@ -69,7 +70,7 @@ async fn test_websocket_authentication_success() {
             ServerMessage::Authenticated { user_id, username } => {
                 assert_eq!(user_id, 123);
                 assert_eq!(username, "testuser");
-            },
+            }
             _ => panic!("Expected authenticated message, got: {:?}", server_msg),
         }
     } else {
@@ -100,7 +101,9 @@ async fn test_websocket_authentication_failure() {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     // Send invalid authentication message
-    let auth_msg = ClientMessage::Auth { token: invalid_token.to_string() };
+    let auth_msg = ClientMessage::Auth {
+        token: invalid_token.to_string(),
+    };
     let auth_json = serde_json::to_string(&auth_msg).unwrap();
     ws_sender.send(Message::Text(auth_json)).await.unwrap();
 
@@ -110,7 +113,7 @@ async fn test_websocket_authentication_failure() {
         match server_msg {
             ServerMessage::Error { message, .. } => {
                 assert!(message.contains("Authentication failed"));
-            },
+            }
             _ => panic!("Expected error message, got: {:?}", server_msg),
         }
     } else {
@@ -160,11 +163,15 @@ async fn test_room_join_and_leave_flow() {
     if let Some(Ok(Message::Text(response))) = ws_receiver.next().await {
         let server_msg: ServerMessage = serde_json::from_str(&response).unwrap();
         match server_msg {
-            ServerMessage::RoomJoined { room_name, user_id, participants } => {
+            ServerMessage::RoomJoined {
+                room_name,
+                user_id,
+                participants,
+            } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(user_id, 123);
                 assert!(participants.is_empty()); // No other participants
-            },
+            }
             _ => panic!("Expected room joined message, got: {:?}", server_msg),
         }
     }
@@ -183,7 +190,7 @@ async fn test_room_join_and_leave_flow() {
             ServerMessage::RoomLeft { room_name, user_id } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(user_id, 123);
-            },
+            }
             _ => panic!("Expected room left message, got: {:?}", server_msg),
         }
     }
@@ -210,11 +217,15 @@ async fn test_multiple_users_in_room() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     // Connect first user
-    let (ws_stream1, _) = connect_async(&ws_url).await.expect("Failed to connect user1");
+    let (ws_stream1, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect user1");
     let (mut ws_sender1, mut ws_receiver1) = ws_stream1.split();
 
     // Connect second user
-    let (ws_stream2, _) = connect_async(&ws_url).await.expect("Failed to connect user2");
+    let (ws_stream2, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect user2");
     let (mut ws_sender2, mut ws_receiver2) = ws_stream2.split();
 
     // Authenticate both users
@@ -249,12 +260,16 @@ async fn test_multiple_users_in_room() {
     if let Some(Ok(Message::Text(response))) = ws_receiver2.next().await {
         let server_msg: ServerMessage = serde_json::from_str(&response).unwrap();
         match server_msg {
-            ServerMessage::RoomJoined { room_name, user_id, participants } => {
+            ServerMessage::RoomJoined {
+                room_name,
+                user_id,
+                participants,
+            } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(user_id, 456);
                 assert_eq!(participants.len(), 1);
                 assert_eq!(participants[0].user_id, 123);
-            },
+            }
             _ => panic!("Expected room joined message, got: {:?}", server_msg),
         }
     }
@@ -267,7 +282,7 @@ async fn test_multiple_users_in_room() {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(user.user_id, 456);
                 assert_eq!(user.username, "user2");
-            },
+            }
             _ => panic!("Expected user joined message, got: {:?}", server_msg),
         }
     }
@@ -294,27 +309,49 @@ async fn test_webrtc_signaling_flow() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     // Connect and authenticate both users, join same room (similar to previous test)
-    let (ws_stream1, _) = connect_async(&ws_url).await.expect("Failed to connect user1");
+    let (ws_stream1, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect user1");
     let (mut ws_sender1, mut ws_receiver1) = ws_stream1.split();
 
-    let (ws_stream2, _) = connect_async(&ws_url).await.expect("Failed to connect user2");
+    let (ws_stream2, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect user2");
     let (mut ws_sender2, mut ws_receiver2) = ws_stream2.split();
 
     // Quick setup (authenticate and join room)
     let auth_msg1 = ClientMessage::Auth { token: token1 };
-    ws_sender1.send(Message::Text(serde_json::to_string(&auth_msg1).unwrap())).await.unwrap();
+    ws_sender1
+        .send(Message::Text(serde_json::to_string(&auth_msg1).unwrap()))
+        .await
+        .unwrap();
     let _auth_response1 = ws_receiver1.next().await;
 
     let auth_msg2 = ClientMessage::Auth { token: token2 };
-    ws_sender2.send(Message::Text(serde_json::to_string(&auth_msg2).unwrap())).await.unwrap();
+    ws_sender2
+        .send(Message::Text(serde_json::to_string(&auth_msg2).unwrap()))
+        .await
+        .unwrap();
     let _auth_response2 = ws_receiver2.next().await;
 
-    let join_msg1 = ClientMessage::JoinRoom { room_name: "test_room".to_string(), password: None };
-    ws_sender1.send(Message::Text(serde_json::to_string(&join_msg1).unwrap())).await.unwrap();
+    let join_msg1 = ClientMessage::JoinRoom {
+        room_name: "test_room".to_string(),
+        password: None,
+    };
+    ws_sender1
+        .send(Message::Text(serde_json::to_string(&join_msg1).unwrap()))
+        .await
+        .unwrap();
     let _join_response1 = ws_receiver1.next().await;
 
-    let join_msg2 = ClientMessage::JoinRoom { room_name: "test_room".to_string(), password: None };
-    ws_sender2.send(Message::Text(serde_json::to_string(&join_msg2).unwrap())).await.unwrap();
+    let join_msg2 = ClientMessage::JoinRoom {
+        room_name: "test_room".to_string(),
+        password: None,
+    };
+    ws_sender2
+        .send(Message::Text(serde_json::to_string(&join_msg2).unwrap()))
+        .await
+        .unwrap();
     let _join_response2 = ws_receiver2.next().await;
     let _user_joined = ws_receiver1.next().await; // User1 receives user2 joined notification
 
@@ -324,17 +361,24 @@ async fn test_webrtc_signaling_flow() {
         sdp: "test_offer_sdp".to_string(),
         target_user_id: Some(456),
     };
-    ws_sender1.send(Message::Text(serde_json::to_string(&offer_msg).unwrap())).await.unwrap();
+    ws_sender1
+        .send(Message::Text(serde_json::to_string(&offer_msg).unwrap()))
+        .await
+        .unwrap();
 
     // User2 should receive the offer
     if let Some(Ok(Message::Text(response))) = ws_receiver2.next().await {
         let server_msg: ServerMessage = serde_json::from_str(&response).unwrap();
         match server_msg {
-            ServerMessage::Offer { room_name, from_user_id, sdp } => {
+            ServerMessage::Offer {
+                room_name,
+                from_user_id,
+                sdp,
+            } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(from_user_id, 123);
                 assert_eq!(sdp, "test_offer_sdp");
-            },
+            }
             _ => panic!("Expected offer message, got: {:?}", server_msg),
         }
     }
@@ -345,17 +389,24 @@ async fn test_webrtc_signaling_flow() {
         sdp: "test_answer_sdp".to_string(),
         target_user_id: 123,
     };
-    ws_sender2.send(Message::Text(serde_json::to_string(&answer_msg).unwrap())).await.unwrap();
+    ws_sender2
+        .send(Message::Text(serde_json::to_string(&answer_msg).unwrap()))
+        .await
+        .unwrap();
 
     // User1 should receive the answer
     if let Some(Ok(Message::Text(response))) = ws_receiver1.next().await {
         let server_msg: ServerMessage = serde_json::from_str(&response).unwrap();
         match server_msg {
-            ServerMessage::Answer { room_name, from_user_id, sdp } => {
+            ServerMessage::Answer {
+                room_name,
+                from_user_id,
+                sdp,
+            } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(from_user_id, 456);
                 assert_eq!(sdp, "test_answer_sdp");
-            },
+            }
             _ => panic!("Expected answer message, got: {:?}", server_msg),
         }
     }
@@ -368,19 +419,28 @@ async fn test_webrtc_signaling_flow() {
         sdp_mline_index: Some(0),
         target_user_id: Some(456),
     };
-    ws_sender1.send(Message::Text(serde_json::to_string(&ice_msg).unwrap())).await.unwrap();
+    ws_sender1
+        .send(Message::Text(serde_json::to_string(&ice_msg).unwrap()))
+        .await
+        .unwrap();
 
     // User2 should receive the ICE candidate
     if let Some(Ok(Message::Text(response))) = ws_receiver2.next().await {
         let server_msg: ServerMessage = serde_json::from_str(&response).unwrap();
         match server_msg {
-            ServerMessage::IceCandidate { room_name, from_user_id, candidate, sdp_mid, sdp_mline_index } => {
+            ServerMessage::IceCandidate {
+                room_name,
+                from_user_id,
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+            } => {
                 assert_eq!(room_name, "test_room");
                 assert_eq!(from_user_id, 123);
                 assert_eq!(candidate, "test_ice_candidate");
                 assert_eq!(sdp_mid, Some("0".to_string()));
                 assert_eq!(sdp_mline_index, Some(0));
-            },
+            }
             _ => panic!("Expected ICE candidate message, got: {:?}", server_msg),
         }
     }

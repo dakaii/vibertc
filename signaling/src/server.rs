@@ -5,16 +5,26 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use uuid::Uuid;
 // Removed url dependency
-use anyhow::Result;
 use tracing::{debug, error, info};
 
 use crate::auth::JwtValidator;
-use crate::messages::{ClientMessage, ServerMessage};
-use crate::room::{RoomManager, RoomParticipant};
+use crate::messages::{ClientMessage, Publisher, ServerMessage};
+use crate::rheomesh_sfu::RheomeshSfu;
+use crate::room::LocalRoomManager;
+use crate::room::Room;
+use crate::room::{RoomManager, RoomParticipant, Rooms};
+use rheomesh::transport::Transport;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-pub async fn start_server(host: String, port: u16, jwt_secret: String) -> Result<()> {
+pub async fn start_server(
+    host: String,
+    port: u16,
+    jwt_secret: String,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let room_manager = RoomManager::new();
-    start_server_with_room_manager(host, port, jwt_secret, room_manager).await
+    start_server_with_room_manager_and_sfu(host, port, jwt_secret, room_manager, None).await
 }
 
 pub async fn start_server_with_room_manager(
@@ -22,7 +32,17 @@ pub async fn start_server_with_room_manager(
     port: u16,
     jwt_secret: String,
     room_manager: RoomManager,
-) -> Result<()> {
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_server_with_room_manager_and_sfu(host, port, jwt_secret, room_manager, None).await
+}
+
+pub async fn start_server_with_room_manager_and_sfu(
+    host: String,
+    port: u16,
+    jwt_secret: String,
+    room_manager: RoomManager,
+    sfu: Option<Arc<RheomeshSfu>>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
 
@@ -36,9 +56,10 @@ pub async fn start_server_with_room_manager(
 
         let jwt_validator = jwt_validator.clone();
         let room_manager = room_manager.clone();
+        let sfu = sfu.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, jwt_validator, room_manager).await {
+            if let Err(e) = handle_connection(stream, jwt_validator, room_manager, sfu).await {
                 error!("Connection error: {}", e);
             }
         });
@@ -51,7 +72,8 @@ async fn handle_connection(
     stream: TcpStream,
     jwt_validator: Arc<JwtValidator>,
     room_manager: Arc<RoomManager>,
-) -> Result<()> {
+    sfu: Option<Arc<RheomeshSfu>>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let connection_id = Uuid::new_v4();
 
     let ws_stream = accept_async(stream).await?;
@@ -102,7 +124,8 @@ async fn handle_connection(
             match msg_result {
                 Ok(Message::Text(text)) => {
                     if let Err(e) =
-                        handle_client_message(&text, &user, connection_id, &room_manager, &tx).await
+                        handle_client_message(&text, &user, connection_id, &room_manager, &sfu, &tx)
+                            .await
                     {
                         error!("Error handling message: {}", e);
                         let error_msg =
@@ -221,6 +244,7 @@ async fn handle_client_message(
     user: &crate::auth::AuthenticatedUser,
     connection_id: Uuid,
     room_manager: &RoomManager,
+    sfu: &Option<Arc<RheomeshSfu>>,
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<(), String> {
     debug!("Received message from user {}: {}", user.user_id, text);
@@ -242,6 +266,8 @@ async fn handle_client_message(
                 user: user.clone(),
                 connection_id,
                 sender: tx.clone(),
+                publish_transport: None,
+                subscribe_transport: None,
             };
 
             match room_manager.join_room(room_name.clone(), participant).await {
@@ -287,22 +313,37 @@ async fn handle_client_message(
                 return Ok(());
             }
 
-            let offer_msg = ServerMessage::Offer {
-                room_name: room_name.clone(),
-                from_user_id: user.user_id,
-                sdp,
-            };
-
-            if let Some(target_id) = target_user_id {
-                room_manager
-                    .send_to_user_in_room(&room_name, target_id, offer_msg)
-                    .await
-                    .map_err(|e| format!("Failed to send offer: {}", e))?;
+            // SFU integration: handle offer via publish_transport
+            let rooms = room_manager.get_rooms();
+            let rooms_guard = rooms.read().await;
+            if let Some(room) = rooms_guard.get(&room_name) {
+                if let Some(participant) = room.participants.get(&user.user_id) {
+                    if let Some(publish_transport) = &participant.publish_transport {
+                        // Call get_answer on the publish_transport with SDP string
+                        let offer_sdp = RTCSessionDescription::offer(sdp)
+                            .map_err(|e| format!("Failed to parse offer SDP: {}", e))?;
+                        let answer = publish_transport
+                            .get_answer(offer_sdp)
+                            .await
+                            .map_err(|e| format!("SFU get_answer error: {}", e))?;
+                        let answer_msg = ServerMessage::Answer {
+                            room_name: room_name.clone(),
+                            from_user_id: user.user_id,
+                            sdp: answer.sdp,
+                        };
+                        send_message(tx, answer_msg)?;
+                    } else {
+                        let error_msg =
+                            ServerMessage::error("No publish transport for participant");
+                        send_message(tx, error_msg)?;
+                    }
+                } else {
+                    let error_msg = ServerMessage::error("Participant not found in room");
+                    send_message(tx, error_msg)?;
+                }
             } else {
-                room_manager
-                    .broadcast_to_room(&room_name, user.user_id, offer_msg)
-                    .await
-                    .map_err(|e| format!("Failed to broadcast offer: {}", e))?;
+                let error_msg = ServerMessage::error("Room not found");
+                send_message(tx, error_msg)?;
             }
         }
 
@@ -316,50 +357,268 @@ async fn handle_client_message(
                 send_message(tx, error_msg)?;
                 return Ok(());
             }
-
-            let answer_msg = ServerMessage::Answer {
-                room_name: room_name.clone(),
-                from_user_id: user.user_id,
-                sdp,
-            };
-
-            room_manager
-                .send_to_user_in_room(&room_name, target_user_id, answer_msg)
-                .await
-                .map_err(|e| format!("Failed to send answer: {}", e))?;
+            // SFU integration: set_answer on subscribe_transport
+            let rooms = room_manager.get_rooms();
+            let rooms_guard = rooms.read().await;
+            if let Some(room) = rooms_guard.get(&room_name) {
+                if let Some(participant) = room.participants.get(&user.user_id) {
+                    if let Some(subscribe_transport) = &participant.subscribe_transport {
+                        let answer_sdp = RTCSessionDescription::answer(sdp)
+                            .map_err(|e| format!("Failed to parse answer SDP: {}", e))?;
+                        subscribe_transport
+                            .set_answer(answer_sdp)
+                            .await
+                            .map_err(|e| format!("SFU set_answer error: {}", e))?;
+                        // Optionally send a confirmation
+                    } else {
+                        let error_msg =
+                            ServerMessage::error("No subscribe transport for participant");
+                        send_message(tx, error_msg)?;
+                    }
+                } else {
+                    let error_msg = ServerMessage::error("Participant not found in room");
+                    send_message(tx, error_msg)?;
+                }
+            } else {
+                let error_msg = ServerMessage::error("Room not found");
+                send_message(tx, error_msg)?;
+            }
         }
 
         ClientMessage::IceCandidate {
             room_name,
             candidate,
-            sdp_mid,
-            sdp_mline_index,
-            target_user_id,
+            sdp_mid: _,
+            sdp_mline_index: _,
+            target_user_id: _,
         } => {
             if !room_manager.user_in_room(&room_name, user.user_id).await {
                 let error_msg = ServerMessage::error("You are not in this room");
                 send_message(tx, error_msg)?;
                 return Ok(());
             }
-
-            let ice_msg = ServerMessage::IceCandidate {
-                room_name: room_name.clone(),
-                from_user_id: user.user_id,
-                candidate,
-                sdp_mid,
-                sdp_mline_index,
-            };
-
-            if let Some(target_id) = target_user_id {
-                room_manager
-                    .send_to_user_in_room(&room_name, target_id, ice_msg)
-                    .await
-                    .map_err(|e| format!("Failed to send ICE candidate: {}", e))?;
+            // SFU integration: add_ice_candidate to both transports
+            let rooms = room_manager.get_rooms();
+            let rooms_guard = rooms.read().await;
+            if let Some(room) = rooms_guard.get(&room_name) {
+                if let Some(participant) = room.participants.get(&user.user_id) {
+                    let mut ok = false;
+                    if let Some(publish_transport) = &participant.publish_transport {
+                        if publish_transport
+                            .add_ice_candidate(&candidate)
+                            .await
+                            .is_ok()
+                        {
+                            ok = true;
+                        }
+                    }
+                    if let Some(subscribe_transport) = &participant.subscribe_transport {
+                        if subscribe_transport
+                            .add_ice_candidate(&candidate)
+                            .await
+                            .is_ok()
+                        {
+                            ok = true;
+                        }
+                    }
+                    if !ok {
+                        let error_msg =
+                            ServerMessage::error("Failed to add ICE candidate to any transport");
+                        send_message(tx, error_msg)?;
+                    }
+                } else {
+                    let error_msg = ServerMessage::error("Participant not found in room");
+                    send_message(tx, error_msg)?;
+                }
             } else {
-                room_manager
-                    .broadcast_to_room(&room_name, user.user_id, ice_msg)
+                let error_msg = ServerMessage::error("Room not found");
+                send_message(tx, error_msg)?;
+            }
+        }
+
+        // SFU-specific message handlers
+        ClientMessage::PublishOffer { room_name, offer } => {
+            if let Some(sfu) = sfu {
+                match sfu
+                    .add_participant(&room_name, user.user_id as i32, user.username.clone())
                     .await
-                    .map_err(|e| format!("Failed to broadcast ICE candidate: {}", e))?;
+                {
+                    Ok(_) => {
+                        let offer_sdp = RTCSessionDescription::offer(offer)
+                            .map_err(|e| format!("Failed to parse offer SDP: {}", e))?;
+
+                        match sfu
+                            .handle_publish_offer(&room_name, user.user_id as i32, offer_sdp)
+                            .await
+                        {
+                            Ok(answer) => {
+                                let answer_msg = ServerMessage::PublishAnswer {
+                                    room_name,
+                                    answer: answer.sdp,
+                                };
+                                send_message(tx, answer_msg)?;
+
+                                // Notify other participants about new publisher
+                                if let Ok(participants) =
+                                    sfu.get_room_participants(&room_name).await
+                                {
+                                    let new_publisher_msg = ServerMessage::NewPublisher {
+                                        room_name: room_name.clone(),
+                                        publisher_id: user.user_id,
+                                        username: user.username.clone(),
+                                    };
+                                    // Broadcast to room participants (implementation needed)
+                                    // For now, just send to self
+                                    send_message(tx, new_publisher_msg)?;
+                                }
+                            }
+                            Err(e) => {
+                                let error_msg =
+                                    ServerMessage::error(format!("SFU publish offer error: {}", e));
+                                send_message(tx, error_msg)?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg =
+                            ServerMessage::error(format!("Failed to add participant: {}", e));
+                        send_message(tx, error_msg)?;
+                    }
+                }
+            } else {
+                let error_msg = ServerMessage::error("SFU not available");
+                send_message(tx, error_msg)?;
+            }
+        }
+
+        ClientMessage::PublishIceCandidate {
+            room_name,
+            candidate,
+        } => {
+            if let Some(sfu) = sfu {
+                match sfu
+                    .handle_publish_ice_candidate(&room_name, user.user_id as i32, &candidate)
+                    .await
+                {
+                    Ok(_) => {
+                        let ice_msg = ServerMessage::PublishIceCandidate {
+                            room_name,
+                            candidate,
+                        };
+                        send_message(tx, ice_msg)?;
+                    }
+                    Err(e) => {
+                        let error_msg =
+                            ServerMessage::error(format!("SFU publish ICE candidate error: {}", e));
+                        send_message(tx, error_msg)?;
+                    }
+                }
+            } else {
+                let error_msg = ServerMessage::error("SFU not available");
+                send_message(tx, error_msg)?;
+            }
+        }
+
+        ClientMessage::SubscribeRequest {
+            room_name,
+            publisher_id,
+        } => {
+            if let Some(sfu) = sfu {
+                match sfu
+                    .handle_subscribe_request(&room_name, user.user_id as i32, publisher_id as i32)
+                    .await
+                {
+                    Ok(offer) => {
+                        let offer_msg = ServerMessage::SubscribeOffer {
+                            room_name,
+                            publisher_id,
+                            offer: offer.sdp,
+                        };
+                        send_message(tx, offer_msg)?;
+                    }
+                    Err(e) => {
+                        let error_msg =
+                            ServerMessage::error(format!("SFU subscribe request error: {}", e));
+                        send_message(tx, error_msg)?;
+                    }
+                }
+            } else {
+                let error_msg = ServerMessage::error("SFU not available");
+                send_message(tx, error_msg)?;
+            }
+        }
+
+        ClientMessage::SubscribeAnswer {
+            room_name,
+            publisher_id,
+            answer,
+        } => {
+            if let Some(sfu) = sfu {
+                let answer_sdp = RTCSessionDescription::answer(answer)
+                    .map_err(|e| format!("Failed to parse answer SDP: {}", e))?;
+
+                match sfu
+                    .handle_subscribe_answer(
+                        &room_name,
+                        user.user_id as i32,
+                        publisher_id as i32,
+                        answer_sdp,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        // Subscription established successfully
+                        debug!(
+                            "Subscription established for user {} to publisher {}",
+                            user.user_id, publisher_id
+                        );
+                    }
+                    Err(e) => {
+                        let error_msg =
+                            ServerMessage::error(format!("SFU subscribe answer error: {}", e));
+                        send_message(tx, error_msg)?;
+                    }
+                }
+            } else {
+                let error_msg = ServerMessage::error("SFU not available");
+                send_message(tx, error_msg)?;
+            }
+        }
+
+        ClientMessage::SubscribeIceCandidate {
+            room_name,
+            publisher_id,
+            candidate,
+        } => {
+            if let Some(sfu) = sfu {
+                match sfu
+                    .handle_subscribe_ice_candidate(
+                        &room_name,
+                        user.user_id as i32,
+                        publisher_id as i32,
+                        &candidate,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let ice_msg = ServerMessage::SubscribeIceCandidate {
+                            room_name,
+                            publisher_id,
+                            candidate,
+                        };
+                        send_message(tx, ice_msg)?;
+                    }
+                    Err(e) => {
+                        let error_msg = ServerMessage::error(format!(
+                            "SFU subscribe ICE candidate error: {}",
+                            e
+                        ));
+                        send_message(tx, error_msg)?;
+                    }
+                }
+            } else {
+                let error_msg = ServerMessage::error("SFU not available");
+                send_message(tx, error_msg)?;
             }
         }
     }

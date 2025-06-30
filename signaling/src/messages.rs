@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -48,6 +49,47 @@ pub enum ClientMessage {
         sdp_mline_index: Option<u32>,
         #[serde(rename = "targetUserId")]
         target_user_id: Option<u32>,
+    },
+
+    // SFU specific messages
+    #[serde(rename = "publish-offer")]
+    PublishOffer {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        offer: String, // SDP offer
+    },
+
+    #[serde(rename = "publish-ice-candidate")]
+    PublishIceCandidate {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        candidate: String,
+    },
+
+    #[serde(rename = "subscribe-request")]
+    SubscribeRequest {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+    },
+
+    #[serde(rename = "subscribe-answer")]
+    SubscribeAnswer {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+        answer: String, // SDP answer
+    },
+
+    #[serde(rename = "subscribe-ice-candidate")]
+    SubscribeIceCandidate {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+        candidate: String,
     },
 }
 
@@ -126,6 +168,63 @@ pub enum ServerMessage {
         user_id: u32,
         username: String,
     },
+
+    // SFU specific messages
+    #[serde(rename = "publish-answer")]
+    PublishAnswer {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        answer: String, // SDP answer
+    },
+
+    #[serde(rename = "publish-ice-candidate")]
+    PublishIceCandidate {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        candidate: String,
+    },
+
+    #[serde(rename = "subscribe-offer")]
+    SubscribeOffer {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+        offer: String, // SDP offer
+    },
+
+    #[serde(rename = "subscribe-ice-candidate")]
+    SubscribeIceCandidate {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+        candidate: String,
+    },
+
+    #[serde(rename = "new-publisher")]
+    NewPublisher {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+        username: String,
+    },
+
+    #[serde(rename = "publisher-left")]
+    PublisherLeft {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        #[serde(rename = "publisherId")]
+        publisher_id: u32,
+    },
+
+    #[serde(rename = "publishers-list")]
+    PublishersList {
+        #[serde(rename = "roomName")]
+        room_name: String,
+        publishers: Vec<Publisher>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +232,14 @@ pub enum ServerMessage {
 pub struct Participant {
     #[serde(rename = "userId")]
     pub user_id: u32,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Publisher {
+    #[serde(rename = "publisherId")]
+    pub publisher_id: u32,
     pub username: String,
 }
 

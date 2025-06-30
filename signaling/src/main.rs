@@ -1,12 +1,13 @@
 mod auth;
 mod cluster;
 mod messages;
+mod rheomesh_sfu;
 mod room;
 mod server;
 
 use anyhow::Result;
 use clap::Parser;
-use std::env;
+use std::{env, sync::Arc};
 use tracing::{info, warn};
 
 #[derive(Parser)]
@@ -58,10 +59,23 @@ async fn main() -> Result<()> {
         room::RoomManager::new()
     };
 
+    // Initialize Rheomesh SFU
+    let sfu = match rheomesh_sfu::RheomeshSfu::new().await {
+        Ok(sfu) => {
+            info!("🚀 Rheomesh SFU initialized successfully");
+            Some(Arc::new(sfu))
+        }
+        Err(e) => {
+            warn!("Failed to initialize Rheomesh SFU: {}", e);
+            warn!("Continuing without SFU - signaling only mode");
+            None
+        }
+    };
+
     println!("Starting WebRTC signaling server on {}:{}", host, port);
     println!("JWT authentication enabled");
 
-    server::start_server_with_room_manager(host, port, jwt_secret, room_manager).await
+    server::start_server_with_room_manager_and_sfu(host, port, jwt_secret, room_manager, sfu).await
 }
 
 /// Initialize cluster mode with Redis
@@ -71,10 +85,7 @@ async fn initialize_cluster_mode(
 
     let node_id = env::var("NODE_ID").unwrap_or_else(|_| {
         // Generate a unique node ID if not provided
-        format!(
-            "signaling-{}",
-            &uuid::Uuid::new_v4().to_string()[..8]
-        )
+        format!("signaling-{}", &uuid::Uuid::new_v4().to_string()[..8])
     });
 
     info!("Initializing cluster mode with Redis URL: {}", redis_url);

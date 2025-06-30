@@ -9,28 +9,26 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-tungstenite = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-jsonwebtoken = "8.0"
-uuid = { version = "1.0", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+jsonwebtoken = "8.0"
+async-trait = "0.1"
+redis = { version = "0.25", features = ["aio", "tokio-comp"] }
 futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+rheomesh = "0.5.0"
+webrtc = "0.13.0"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
-redis = { version = "0.25", features = ["aio", "tokio-comp"] }
-chrono = { version = "0.4", features = ["serde"] }
-async-trait = "0.1"
+reqwest = { version = "0.11", features = ["json"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
-tokio-tungstenite = "0.17"
-futures-util = "0.3"
-serde_json = "1.0"
-jsonwebtoken = "8.3"
-redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
-chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.0"
 mockall = "0.12"
 
 [lib]
 name = "webrtc_signaling"
 path = "src/lib.rs"
+
+
