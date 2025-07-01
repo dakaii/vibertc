@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]

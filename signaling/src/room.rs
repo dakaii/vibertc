@@ -1,33 +1,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::auth::AuthenticatedUser;
 use crate::messages::{Participant, ServerMessage};
-use rheomesh::config::MediaConfig;
-use rheomesh::config::WebRTCTransportConfig;
-use rheomesh::publish_transport::PublishTransport;
-use rheomesh::router::Router;
-use rheomesh::subscribe_transport::SubscribeTransport;
-use rheomesh::worker::Worker;
 
 #[derive(Debug, Clone)]
 pub struct RoomParticipant {
     pub user: AuthenticatedUser,
     pub connection_id: Uuid,
     pub sender: mpsc::UnboundedSender<Message>,
-    pub publish_transport: Option<Arc<PublishTransport>>,
-    pub subscribe_transport: Option<Arc<SubscribeTransport>>,
 }
 
 #[derive(Debug)]
 pub struct Room {
     pub name: String,
     pub participants: HashMap<u32, RoomParticipant>, // user_id -> participant
-    pub router: Option<Arc<Mutex<Router>>>,
 }
 
 impl Room {
@@ -35,7 +26,6 @@ impl Room {
         Self {
             name,
             participants: HashMap::new(),
-            router: None,
         }
     }
 
@@ -173,7 +163,6 @@ pub trait RoomManagerTrait: Send + Sync {
 // Local implementation (existing behavior)
 pub struct LocalRoomManager {
     rooms: Rooms,
-    worker: Arc<Mutex<Worker>>,
 }
 
 impl Default for LocalRoomManager {
@@ -184,14 +173,8 @@ impl Default for LocalRoomManager {
 
 impl LocalRoomManager {
     pub fn new() -> Self {
-        let worker = Arc::new(Mutex::new(
-            tokio::runtime::Handle::current()
-                .block_on(Worker::new(rheomesh::config::WorkerConfig::default()))
-                .expect("Failed to create Worker"),
-        ));
         Self {
             rooms: Arc::new(RwLock::new(HashMap::new())),
-            worker,
         }
     }
 
@@ -205,42 +188,12 @@ impl RoomManagerTrait for LocalRoomManager {
     async fn join_room(
         &self,
         room_name: String,
-        mut participant: RoomParticipant,
+        participant: RoomParticipant,
     ) -> Result<Vec<Participant>, String> {
         let mut rooms = self.rooms.write().await;
-        let room = rooms.entry(room_name.clone()).or_insert_with(|| Room {
-            name: room_name.clone(),
-            participants: HashMap::new(),
-            router: None,
-        });
-
-        // Create SFU Router if not present
-        if room.router.is_none() {
-            let config = MediaConfig::default();
-            let mut worker = self.worker.lock().await;
-            let router = worker.new_router(config);
-            room.router = Some(Arc::new(Mutex::new(router)));
-        }
-        let router = room.router.as_ref().unwrap().clone();
-
-        // Create publish and subscribe transports for this participant using default config
-        let transport_config = WebRTCTransportConfig::default();
-        let publish_transport = Arc::new(
-            router
-                .lock()
-                .await
-                .create_publish_transport(transport_config.clone())
-                .await,
-        );
-        let subscribe_transport = Arc::new(
-            router
-                .lock()
-                .await
-                .create_subscribe_transport(transport_config)
-                .await,
-        );
-        participant.publish_transport = Some(publish_transport);
-        participant.subscribe_transport = Some(subscribe_transport);
+        let room = rooms
+            .entry(room_name.clone())
+            .or_insert_with(|| Room::new(room_name.clone()));
 
         let existing_participants = room.get_participants_list();
 
